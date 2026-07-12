@@ -200,7 +200,7 @@ Tests move an instance through time by rewriting these files at runtime.
 Sleeps and waits in both the client CGI program and the service are
 periods of *engine* time, divided by `TIME_FACTOR` to get the real wait -
 at factor 5, a 250ms service sleep is a real 50ms, and a 30-second engine
-timer fires in 1.5 real seconds. Engine code takes "now" from
+timer fires in 6 real seconds. Engine code takes "now" from
 `common::time`, never from the system clock directly; a production
 instance always runs on true calendar time and never reads these files.
 
