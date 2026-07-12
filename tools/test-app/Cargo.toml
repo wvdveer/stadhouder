@@ -1,0 +1,13 @@
+[package]
+name = "test-app"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "test-app"
+path = "src/main.rs"
+
+[dependencies]
+common = { path = "../../rust/backend/common" }
+serde_json = "1"
+stadhouder = { path = "../../rust/backend/service" }

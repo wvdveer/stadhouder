@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["common", "api", "service"]
+
+# Size-tuned release binaries: the CGI endpoints are network-latency bound,
+# so opt-level "z"'s CPU cost is irrelevant, while every byte is deployed
+# once per endpoint binary. panic stays "unwind" on purpose -
+# common::handler::json_handler's catch_unwind turns panics into readable
+# JSON errors instead of opaque Apache 500s; panic = "abort" would break it.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "symbols"

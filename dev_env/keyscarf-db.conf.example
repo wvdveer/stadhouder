@@ -1,0 +1,13 @@
+# Per-developer KeyScarf database connection details. Copy to
+# dev_env/keyscarf-db.conf (gitignored) and edit.
+#
+# When present, tools/scripts/stage-keyscarf.sh uses this to pre-seed
+# site/keyscarf/cfg/authsite.conf (KeyScarf's own bootstrap config file -
+# same KEY=value format as stadhouder's own stadhouder.conf) so its setup
+# wizard's DB-connection step is already satisfied and skips straight to
+# schema installation / first-admin creation. Never overwrites an existing
+# authsite.conf - safe to leave in place across re-stages.
+DB_HOST=localhost
+DB_USER=
+DB_PASS=
+DB_NAME=

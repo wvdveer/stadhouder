@@ -1,0 +1,12 @@
+[package]
+name = "cron-sim"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "cron-sim"
+path = "src/main.rs"
+
+[dependencies]
+common = { path = "../../rust/backend/common" }
+clap = { version = "4", features = ["derive"] }

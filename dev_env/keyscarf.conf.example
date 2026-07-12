@@ -1,0 +1,10 @@
+# Per-developer overrides for where fetch-keyscarf.sh / stage-keyscarf.sh
+# get the KeyScarf release package. Copy to dev_env/keyscarf.conf (gitignored)
+# and edit. Sourced as shell - keep it KEY=value.
+
+# Where the archives live. http(s):// or file:// both work.
+# Default: the official GitHub release.
+#KEYSCARF_RELEASE_BASE=file:///C:/projects/rust/usermgr/package/
+
+# Which release to use (underscored form, as in the archive filenames).
+#KEYSCARF_VERSION=0_1_0

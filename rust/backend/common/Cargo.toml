@@ -1,0 +1,26 @@
+[package]
+name = "common"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cgi = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Default features (rustls + json) - a pure-Rust TLS stack, matching the
+# rest of this project's TLS-related choices, and no async runtime (a CGI
+# process makes one outbound call and exits - a good fit for ureq's
+# blocking model).
+ureq = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

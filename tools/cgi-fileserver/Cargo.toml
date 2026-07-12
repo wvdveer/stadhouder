@@ -1,0 +1,17 @@
+[package]
+name = "cgi-fileserver"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "fileserver"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7.2" }
+tower-http = { version = "0.5", features = ["fs", "trace"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
