@@ -43,7 +43,8 @@ taking effect.
 
 Each closed connection is tagged with why: `ClientDisconnected` (the
 client's own `close` request, or its profile file otherwise vanishing),
-`ServerIdleTimeout` (no message from the client for two minutes), or
+`ServerIdleTimeout` (no message and no served `poll` from the client for
+two minutes), or
 `EngineRequested` (the engine itself ordered the close via
 `EngineOutput::close_connections` on a *previous* call - a close can only
 be reported to the call *after* the one that requested it, since the
@@ -117,7 +118,8 @@ connections every four seconds; with none 56 seconds after start it removes
 its flag and exits (the next cron start takes over), and while connections
 exist it serves them until all are closed. It disconnects a client itself -
 removing the connection's profile file and pipes - when the engine orders
-it, and also when the client has sent no message for two minutes. All these
+it, and also when the client has sent no message and had no `poll` served
+for two minutes. All these
 durations are engine time (they scale with `TIME_FACTOR`).
 
 The two talk over **named pipes** - one client-to-server / server-to-client

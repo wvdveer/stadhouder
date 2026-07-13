@@ -248,9 +248,11 @@ Points worth watching:
   *Guarding against memory exhaustion* under *Configuration*; existing
   connections keep working, only new ones are turned away.
 - **Connections silently stop working after ~2 minutes idle** — this is
-  expected: a connection with no client message for two minutes is
-  closed as `ServerIdleTimeout`. Well-behaved clients call `poll`
-  frequently enough that heartbeats keep it alive; this is not a bug to
+  expected: a connection with no client message and no served `poll` for
+  two minutes is closed as `ServerIdleTimeout`. Well-behaved clients call
+  `poll` frequently enough to keep it alive on their own (a served poll
+  counts as a sign of life whether or not it comes back with anything -
+  it doesn't depend on the empty-poll heartbeat); this is not a bug to
   chase unless clients are polling less often than that.
 - **Service never seems to start** — check `stadhouder/state/last_run`
   is advancing (cron is firing) and that no stale `service_flag` is

@@ -47,7 +47,11 @@
 //! with nothing, sends a "heartbeat" message to the service first and
 //! then returns an empty array. The heartbeat refreshes the connection's
 //! last-communication time (keeping it under the service's inactivity
-//! disconnect) without ever reaching the state engine.
+//! disconnect) without ever reaching the state engine - though this only
+//! matters for a client that goes long stretches without calling poll at
+//! all: the service already counts a served poll itself (content or not)
+//! as a sign of life, so a client that just keeps polling regularly never
+//! needs the heartbeat to stay under the timeout.
 extern crate cgi;
 
 use std::time::{Duration, Instant};

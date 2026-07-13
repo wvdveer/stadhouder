@@ -16,7 +16,8 @@
 //!   connection's queued messages (one frame holding a JSON array).
 //! - performs service-initiated disconnections - removing the connection's
 //!   profile file and pipes - when the engine orders a close, and also
-//!   when a client has not sent a message for two minutes.
+//!   when a client shows no sign of life for two minutes: no inbound
+//!   message and no served `poll` (see below).
 //! - a profile that disappears is a client-side close (deleting it is
 //!   exactly what the CGI close request does).
 //!
@@ -31,7 +32,12 @@
 //!
 //! Heartbeat frames from the client (`common::heartbeat`) update a
 //! connection's last-message time like any other traffic but are filtered
-//! out before reaching the engine - see the inbound-draining loop below.
+//! out before reaching the engine - see the inbound-draining loop below. A
+//! served `poll` - even one that comes back with nothing queued - counts
+//! the same way: an engine whose `process_messages` broadcasts often
+//! enough that `poll` never comes back empty would otherwise starve the
+//! client's own empty-poll heartbeat (see `client`'s `poll`) and cut an
+//! otherwise-live connection as `ServerIdleTimeout` out from under it.
 //!
 //! All the durations above are engine time: on a test instance they scale
 //! with TIME_FACTOR, like every other sleep. Stale profiles left by a
@@ -68,7 +74,8 @@ const FLAG_UPDATE_INTERVAL_MS: i64 = 20_000;
 const FLAG_STALE_MS: i64 = 2 * 60_000;
 /// With no client connections this long after start, the instance exits.
 const IDLE_EXIT_MS: i64 = 56_000;
-/// A client silent for this long is disconnected by the service.
+/// A client with no message and no served poll for this long is
+/// disconnected by the service.
 const CLIENT_INACTIVITY_MS: i64 = 2 * 60_000;
 
 struct LiveConnection {
@@ -318,7 +325,7 @@ pub(crate) fn run_loop(
             .map(|(id, _)| id.clone())
             .collect();
         for connection_id in inactive {
-            eprintln!("stadhouder: disconnecting {connection_id} (no message for two minutes)");
+            eprintln!("stadhouder: disconnecting {connection_id} (no message or served poll for two minutes)");
             if let Some(connection) = connections.remove(&connection_id) {
                 teardown(&state_dir, &connection_id, &connection);
             }
@@ -412,8 +419,16 @@ pub(crate) fn run_loop(
             let served = connection.outbound.try_serve_poll(|| {
                 Value::Array(std::mem::take(outbox)).to_string()
             });
-            if let Err(e) = served {
-                eprintln!("stadhouder: poll on {connection_id} failed: {e}");
+            match served {
+                // A served poll - content or not - proves the client is
+                // still here, same as an inbound message. Without this, an
+                // engine that broadcasts often enough that poll never comes
+                // back empty starves the client's empty-poll heartbeat (see
+                // client.rs) and its otherwise-live connection gets cut as
+                // ServerIdleTimeout out from under it.
+                Ok(true) => connection.last_message_ms = now_ms,
+                Ok(false) => {}
+                Err(e) => eprintln!("stadhouder: poll on {connection_id} failed: {e}"),
             }
         }
 
@@ -445,6 +460,14 @@ mod tests {
     use crate::{EngineOutput, OutboundMessage, TimerId, TimerRequest};
     use serde_json::json;
     use std::sync::{Arc, Mutex};
+
+    /// Serializes every test that sets the process-global DOCUMENT_ROOT env
+    /// var: run_loop, on a test_env instance, reads sim-time state files via
+    /// layout::stadhouder_dir(), which resolves from this var - two such
+    /// tests running concurrently (cargo test's default) could each see the
+    /// other's value mid-run. Hold this for as long as DOCUMENT_ROOT needs
+    /// to stay correct, not just while setting it.
+    static DOCUMENT_ROOT_GUARD: Mutex<()> = Mutex::new(());
 
     /// An engine that greets, echoes, and shuts down on request.
     struct EchoEngine;
@@ -777,13 +800,15 @@ mod tests {
     /// another thread.
     #[test]
     fn init_and_shutdown_hooks_fire_once_each() {
+        let _guard = DOCUMENT_ROOT_GUARD.lock().unwrap();
         let stadhouder_dir = temp_stadhouder_dir("init-shutdown");
         let state_dir = stadhouder_dir.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::write(state_dir.join("time_factor"), "1000").unwrap();
-        // The only test in this crate touching DOCUMENT_ROOT (env vars are
-        // process-global) - see full_connection_lifecycle's sibling note
-        // in common::time for the same convention.
+        // Also touched by a_connection_that_keeps_polling_is_never_idle_disconnected
+        // below - see DOCUMENT_ROOT_GUARD's own doc comment (env vars are
+        // process-global) - and full_connection_lifecycle's sibling note in
+        // common::time for the same convention.
         std::env::set_var("DOCUMENT_ROOT", stadhouder_dir.parent().unwrap().join("public_html"));
 
         let mut engine = RecordingEngine::default();
@@ -854,6 +879,60 @@ mod tests {
         pipes::client_send(&control.client_to_server, r#"{"cmd":"shutdown"}"#, 1.0).unwrap();
         loop_thread.join().unwrap().unwrap();
 
+        let _ = std::fs::remove_dir_all(stadhouder_dir.parent().unwrap());
+    }
+
+    /// A connection that keeps calling poll - even though it never sends a
+    /// real message and every poll comes back with nothing queued - must
+    /// never be idle-disconnected: a served poll is itself a sign of life,
+    /// same as an inbound message (see the "Answer waiting polls" step in
+    /// run_loop). Time is accelerated (factor 10) so the two-minute
+    /// engine-time inactivity threshold is crossed in ~12 real seconds,
+    /// well within a unit test's budget, while polling every 900ms real
+    /// time (9s engine time - comfortably under the threshold between
+    /// polls, so the fix, not luck, is what's being exercised.
+    #[test]
+    fn a_connection_that_keeps_polling_is_never_idle_disconnected() {
+        // Held for the whole test, not just while setting the var: run_loop
+        // runs on a background thread here and keeps reading DOCUMENT_ROOT
+        // (via sim-time state) for as long as it's alive - see
+        // DOCUMENT_ROOT_GUARD's doc comment.
+        let _guard = DOCUMENT_ROOT_GUARD.lock().unwrap();
+        let stadhouder_dir = temp_stadhouder_dir("poll-keeps-alive");
+        let state_dir = stadhouder_dir.join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("time_factor"), "10").unwrap();
+        std::env::set_var("DOCUMENT_ROOT", stadhouder_dir.parent().unwrap().join("public_html"));
+
+        let mut engine = RecordingEngine::default();
+        let close_log = Arc::clone(&engine.close_log);
+        let loop_dir = stadhouder_dir.clone();
+        let loop_thread = std::thread::spawn(move || {
+            run_loop(&mut engine, &Config { test_env: true, ..Default::default() }, &loop_dir)
+        });
+        wait_for_flag(&state_dir);
+
+        let subject_id = "60000000-0000-4000-8000-000000000001";
+        let subject = connect(&stadhouder_dir, &state_dir, subject_id, "subject");
+
+        for _ in 0..16 {
+            // One poll episode - open, read whatever's queued (nothing,
+            // here), close. Never sends anything, so without the fix this
+            // connection has no other way to prove it's still there.
+            let _ = pipes::client_receive(&subject.server_to_client, 10.0);
+            std::thread::sleep(Duration::from_millis(900));
+        }
+
+        assert_eq!(
+            wait_for_close_reason(&close_log, subject_id, 4),
+            None,
+            "a connection that kept polling was disconnected as idle anyway"
+        );
+
+        pipes::client_send(&subject.client_to_server, r#"{"cmd":"shutdown"}"#, 10.0).unwrap();
+        loop_thread.join().unwrap().unwrap();
+
+        std::env::remove_var("DOCUMENT_ROOT");
         let _ = std::fs::remove_dir_all(stadhouder_dir.parent().unwrap());
     }
 }
