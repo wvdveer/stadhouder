@@ -1,6 +1,6 @@
 //! The one client CGI program - the HTTP side of stadhouder. POST one JSON
 //! request as the raw body, naming the action via "kind":
-//!   {"kind":"status"}                                            -> {"service":..,"version":..,"test_env":..,"time_ms":..,"service_last_run_ms":..}
+//!   {"kind":"status"}                                            -> {"service":..,"version":..,"test_env":..,"time_ms":..,"service_last_run_ms":..,"service_memory_pct":..}
 //!   {"kind":"connect","user_id":"..."}                           -> {"connection_id":"<uuid>"}
 //!   {"kind":"send","connection_id":"...","message":{...}}        -> {"sent":true}
 //!   {"kind":"poll","connection_id":"...","wait_ms":<engine ms>}  -> {"messages":[...]}
@@ -8,7 +8,9 @@
 //!
 //! status is a health/readiness check: the engine name, version, whether
 //! this is a test instance, the engine's current time (simulated on a
-//! test instance), and when the cron-driven service last ran.
+//! test instance), when the cron-driven service last ran, and its
+//! last-measured memory usage as a percentage of MEMORY_LIMIT_MB (null
+//! when that's unset, or when no instance has ever run).
 //!
 //! connect mints the connection uuid and writes the connection's profile
 //! file into stadhouder/state/ (uuid, user id, the pipe pair's names, the
@@ -32,6 +34,13 @@
 //! `common::identity`. That verified id REPLACES whatever user_id the
 //! request itself supplied; a response with no identity at that path
 //! means "not signed in", and the connect attempt is rejected.
+//!
+//! When `MEMORY_LIMIT_MB` is set, connect also checks the service's
+//! last-measured memory usage (`memory_pct` in the service flag file,
+//! written by the running service - see `common::state::ServiceFlag`) and
+//! rejects the attempt once it reaches `MEMORY_REJECT_PCT` of the limit
+//! (default 100%). No flag (the service isn't currently running) never
+//! blocks a connect attempt.
 //!
 //! poll blocks for up to wait_ms (engine time, scaled by TIME_FACTOR),
 //! returning the moment a message is available - or, if the wait elapses
@@ -79,16 +88,29 @@ cgi::cgi_main! { |request: cgi::Request| -> cgi::Response {
         let reply = match client_request {
             ClientRequest::Status => {
                 let config = Config::load()?;
+                let memory_pct = if config.memory_limit_bytes.is_some() {
+                    state::read_service_flag(&state::state_dir()?)?.map(|flag| flag.memory_pct)
+                } else {
+                    None
+                };
                 json!({
                     "service": "stadhouder",
                     "version": env!("CARGO_PKG_VERSION"),
                     "test_env": config.test_env,
                     "time_ms": time::now_millis(&config)?,
                     "service_last_run_ms": state::last_run_ms()?,
+                    "service_memory_pct": memory_pct,
                 })
             }
             ClientRequest::Connect { user_id } => {
                 let config = Config::load()?;
+
+                if let Some(flag) = state::read_service_flag(&state::state_dir()?)? {
+                    if flag.memory_pct >= config.memory_reject_pct {
+                        return Err("service memory limit exceeded".to_string());
+                    }
+                }
+
                 let cookie_header = request
                     .headers()
                     .get(cgi::http::header::COOKIE)

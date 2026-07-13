@@ -128,11 +128,37 @@ identity-provider enforcement.
 | `COOKIE_NAME` | unset | If set, a `connect` request must carry a cookie of this name — its *presence*, never its value — or the request is refused before a connection is minted. |
 | `USER_ID_URL` | unset | If set, `connect` calls this same-host URL (forwarding the request's own `Cookie` header) to obtain the caller's *verified* identity, instead of trusting whatever `user_id` the request itself claims. Requires `USER_ID_JSON`. |
 | `USER_ID_JSON` | unset | Dot-separated field path (e.g. `data.id`) locating the verified user id inside `USER_ID_URL`'s JSON response. Stadhouder assumes nothing else about that response's shape. |
+| `MEMORY_LIMIT_MB` | unset | If set, the service measures its own memory (RSS) every 20 seconds and treats this as the ceiling. Unset means no measurement is taken at all and no memory-based rejection ever applies. |
+| `MEMORY_REJECT_PCT` | `100` | The percentage of `MEMORY_LIMIT_MB` at or above which `connect` starts refusing new connections. Only meaningful when `MEMORY_LIMIT_MB` is also set; lower it (e.g. `90`) for headroom before the process is completely full. |
 
 Configuration changes take effect on the **next service start** — there
 is no long-lived process to signal, so a config edit made while the
 service is already running (mid-connection) won't be picked up until it
 next exits and a fresh instance starts.
+
+### Guarding against memory exhaustion
+
+Set `MEMORY_LIMIT_MB` to give the service a self-imposed memory ceiling —
+useful on shared hosting where an account-wide memory cap means one
+runaway application can take down everything else on it. Once set, the
+service measures its own RSS every 20 seconds and writes the result (as a
+percentage of the limit) into `stadhouder/state/service_flag`. `connect`
+checks that percentage on every new-connection attempt and refuses once
+it reaches `MEMORY_REJECT_PCT`, with the error `"service memory limit
+exceeded"` — existing connections are unaffected; only new ones are
+turned away.
+
+This is a soft cap, not a hard process limit: the service is never
+killed, and nothing stops its RSS climbing past the configured ceiling
+between measurements. It buys time and turns a slow leak into a visible,
+recoverable symptom (`connect` failures) instead of an OOM kill or a
+host-level suspension — it is not a substitute for fixing the underlying
+memory growth, and cPanel-level memory limits (if your host enforces
+them) still apply on top of it regardless of this setting.
+
+`status` reports the current figure as `service_memory_pct` (see
+*Monitoring* below) - `null` when `MEMORY_LIMIT_MB` is unset, or when no
+instance has run yet to measure it.
 
 ### Pairing with an identity provider
 
@@ -160,7 +186,7 @@ knowing what they are helps when diagnosing an issue:
 
 | State file | Meaning |
 |---|---|
-| `service_flag` | Engine time (ms) the live service instance last refreshed its flag. Present only while an instance is running; its absence (or staleness beyond two minutes) is what lets the next cron tick take over. |
+| `service_flag` | JSON object the live service instance last wrote: the engine time (ms) it was refreshed at, and `memory_pct` (see `MEMORY_LIMIT_MB` under *Configuration*). Present only while an instance is running; its absence (or staleness beyond two minutes) is what lets the next cron tick take over. |
 | `last_run` | Engine time (ms) of the service's most recent cron-triggered run. |
 | `connection_*.json` | One profile per live client connection (uuid, user id, pipe names, connection time). Stale ones are purged automatically when the service starts. |
 | `sim_time_diff`, `time_factor`, `time_factor_start` | Simulated-time controls — meaningful only when `TEST_ENV=true`. A production instance never reads these. |
@@ -185,7 +211,7 @@ curl --data '{"kind":"status"}' https://<your-site>/cgi-bin/stadhouder/client
 A healthy response looks like:
 
 ```json
-{"ok":true,"data":{"service":"stadhouder","version":"...","test_env":false,"time":...,"last_run":...}}
+{"ok":true,"data":{"service":"stadhouder","version":"...","test_env":false,"time_ms":...,"service_last_run_ms":...,"service_memory_pct":null}}
 ```
 
 Points worth watching:
@@ -193,10 +219,15 @@ Points worth watching:
 - `test_env` should always read `false` in production — if it doesn't,
   `TEST_ENV=true` has been left on in `stadhouder.conf` (see *Security
   notes*).
-- `last_run` stalling (not advancing minute to minute) indicates cron
-  isn't reaching the service program at all — check the crontab entry
-  and the cron log/mail for errors, and confirm the service binary is
-  still executable and in place.
+- `service_last_run_ms` stalling (not advancing minute to minute)
+  indicates cron isn't reaching the service program at all — check the
+  crontab entry and the cron log/mail for errors, and confirm the service
+  binary is still executable and in place.
+- `service_memory_pct` climbing steadily toward `MEMORY_REJECT_PCT`
+  (when `MEMORY_LIMIT_MB` is configured) is your early warning before
+  `connect` starts refusing new connections - worth alerting on well
+  before it gets there. `null` means either the limit isn't configured or
+  no instance has run yet to measure it.
 - A `status` call that times out or returns an HTML error page rather
   than JSON is almost always the CGI binary's execute permission (see
   *Installing the application*, step 4).
@@ -211,7 +242,11 @@ Points worth watching:
   browser is actually sending that cookie (e.g. the identity provider's
   session cookie); if `USER_ID_URL` is also set, confirm that endpoint is
   reachable *from the server* (it's called same-host, not from the
-  browser) and returns the field named by `USER_ID_JSON`.
+  browser) and returns the field named by `USER_ID_JSON`. If the error is
+  specifically `"service memory limit exceeded"`, the service's measured
+  RSS has reached `MEMORY_REJECT_PCT` of `MEMORY_LIMIT_MB` — see
+  *Guarding against memory exhaustion* under *Configuration*; existing
+  connections keep working, only new ones are turned away.
 - **Connections silently stop working after ~2 minutes idle** — this is
   expected: a connection with no client message for two minutes is
   closed as `ServerIdleTimeout`. Well-behaved clients call `poll`

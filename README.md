@@ -20,8 +20,10 @@ engine already knows about that, having just requested it.
 
 The engine's main work happens in `process_messages`, called with each
 batch of events - the current timestamp (simulated time on a test
-instance), new connections (connection id + a user id string meaningful to
-the engine), connections closed since the last call, messages that arrived
+instance), the service's own memory usage as a percentage of
+`MEMORY_LIMIT_MB` (`0.0` when unset - see [Configuration](#configuration)),
+new connections (connection id + a user id string meaningful to the
+engine), connections closed since the last call, messages that arrived
 from connections (connection id + JSON, with heartbeats already filtered
 out - see below), and timers that expired (expiry time + the JSON the
 engine gave when setting them). It returns connections to be closed by the
@@ -59,8 +61,8 @@ the profile is exactly what the CGI `close` request does); when the engine
 orders a close, the service deletes the profile itself. Clients drive
 everything through **one** client CGI program, naming the action with a
 `"kind"` field in the JSON request body: `status` (health/readiness -
-service name, version, `test_env`, current engine time, and when the
-service last ran) / `connect` / `send` (one frame down the connection's
+service name, version, `test_env`, current engine time, when the
+service last ran, and its last-measured memory usage) / `connect` / `send` (one frame down the connection's
 client-to-server pipe) / `poll` / `close`.
 
 If `COOKIE_NAME` is configured, `connect` requires a cookie of that name
@@ -69,7 +71,10 @@ connection. If `USER_ID_URL` (and `USER_ID_JSON`) are also configured,
 connect goes further: it calls that same-host URL, forwarding the
 request's own Cookie header, and reads the *verified* identity out of the
 JSON response at the `USER_ID_JSON` field path - replacing whatever
-user_id the request itself claimed. See [Configuration](#configuration).
+user_id the request itself claimed. If `MEMORY_LIMIT_MB` is configured,
+connect also refuses once the service's last-measured memory usage
+reaches `MEMORY_REJECT_PCT` of that limit (default 100%). See
+[Configuration](#configuration).
 
 `poll` takes a `wait_ms` (engine time, scaled by `TIME_FACTOR`): it blocks
 for up to that long, returning the moment a message is available. If the
@@ -104,7 +109,10 @@ The service is strictly single-threaded (a loop and sleep), and instances
 coordinate through a *service flag file* in `stadhouder/state/`: a starting
 instance that finds a flag fresher than two minutes terminates at once (the
 previous start is still operating); otherwise it writes its own flag and
-refreshes it every twenty seconds while it runs. It scans for client
+refreshes it every twenty seconds while it runs, alongside its own
+memory usage as a percentage of `MEMORY_LIMIT_MB` (see
+[Configuration](#configuration)) - `connect` reads that percentage to
+refuse new connections once it's too high. It scans for client
 connections every four seconds; with none 56 seconds after start it removes
 its flag and exits (the next cron start takes over), and while connections
 exist it serves them until all are closed. It disconnects a client itself -
@@ -153,6 +161,10 @@ tools/                Development-only tooling; nothing here ships
 dev_env/              Per-developer config overrides (only *.example committed)
 site/                 Local staging area mirroring a real cPanel account
                       (gitignored; assembled by the scripts)
+docs/                 Guides for people building on or operating stadhouder -
+                      see `docs/administrators-guide.md` for installing and
+                      running a deployed application
+package/              Release archives built by package.sh (gitignored)
 ```
 
 The `site/` tree mirrors a deployed cPanel account: `public_html/` is the
@@ -176,6 +188,8 @@ a safe default:
 | `COOKIE_NAME`   | unset   | If set, `connect` requires a cookie of this name on the request (presence only - the value is never inspected) before it will mint a connection. Locally set to `keyscarf_session` |
 | `USER_ID_URL`   | unset   | If set, `connect` calls this same-host path, forwarding the request's Cookie header, to verify who's actually calling (see `USER_ID_JSON`) instead of trusting the request's self-asserted user_id. Locally set to `/cgi-bin/keyscarf/api_session_check` |
 | `USER_ID_JSON`  | unset   | The dot-separated field path (e.g. `data.id`) to read the verified id from in `USER_ID_URL`'s JSON response - stadhouder assumes nothing else about that response's shape. Required whenever `USER_ID_URL` is set. Locally set to `data.id` |
+| `MEMORY_LIMIT_MB` | unset | If set, the service measures its own memory (RSS) against this ceiling and writes the usage percentage (`memory_pct`) into its service flag file every 20 seconds. Unset means no limit - the service never measures, and `memory_pct` stays `0.0` |
+| `MEMORY_REJECT_PCT` | `100` | The `memory_pct` at or above which `connect` refuses new connections. Only meaningful when `MEMORY_LIMIT_MB` is also set |
 
 Mutable runtime state lives separately, as files under `stadhouder/state/`
 (stadhouder has no database). Currently:
@@ -186,7 +200,7 @@ Mutable runtime state lives separately, as files under `stadhouder/state/`
 | `time_factor`       | `1`     | The rate simulation time passes at relative to calendar time (must be > 0; fractions slow it down) |
 | `time_factor_start` | `0`     | The calendar-time anchor (ms) the rate applies from         |
 | `last_run`          | absent  | Engine time (ms) of the service's most recent cron run      |
-| `service_flag`      | absent  | Engine time (ms) the live service instance last refreshed its flag; removed on exit |
+| `service_flag`      | absent  | JSON object (`updated_ms`, `memory_pct`) the live service instance last wrote; removed on exit. `connect` reads `memory_pct` against `MEMORY_REJECT_PCT` |
 | `connection_*.json` | -       | One profile per live connection (see above); stale ones are purged when the service starts |
 
 A test instance (`TEST_ENV=true`) runs on *simulated time*, which can be
@@ -221,6 +235,7 @@ instance always runs on true calendar time and never reads these files.
 | `copy-to-site.sh`   | Stages built stadhouder CGI binaries into `site/.../cgi-bin/stadhouder/` |
 | `start-site.sh`     | Serves `site/public_html` at `http://127.0.0.1:8080`, and starts cron-sim |
 | `system-test.sh`    | The curl-driven system test suite                                    |
+| `package.sh`        | Builds release archives of stadhouder for a consuming application to install (see `docs/administrators-guide.md`) |
 
 By default `fetch-keyscarf.sh` pulls the 0.1.0 release from GitHub
 (`.../keyscarf/releases/download/0_1_0/keyscarf_<os>_0_1_0.<ext>`); create

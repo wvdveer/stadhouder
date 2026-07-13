@@ -64,6 +64,7 @@ impl StadhouderStateEngine for TestEngine {
     fn process_messages(
         &mut self,
         timestamp_ms: i64,
+        _memory_pct: f64,
         new_connections: &[NewConnection],
         closed_connections: &[ClosedConnection],
         messages: &[InboundMessage],

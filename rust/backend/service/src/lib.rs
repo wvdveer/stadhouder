@@ -148,6 +148,14 @@ pub struct EngineOutput {
 /// Parameters:
 /// - `timestamp_ms` - the current engine time, ms since the Unix epoch
 ///   (simulated time on a test instance);
+/// - `memory_pct` - the service's own memory usage as a percentage of
+///   `MEMORY_LIMIT_MB` (see `common::config::Config::memory_limit_bytes`),
+///   as of the last measurement (every 20 seconds - see
+///   `common::state::ServiceFlag`); `0.0` when no limit is configured. The
+///   library already refuses new connections once this reaches
+///   `MEMORY_REJECT_PCT` (see `client`'s `connect`) - this parameter is for
+///   an engine that wants to react itself (e.g. proactively shedding
+///   connections or logging) rather than just relying on that cutoff;
 /// - `new_connections` - connections that appeared since the last call;
 /// - `closed_connections` - connections closed since the last call, each
 ///   tagged with why (see [`CloseReason`]);
@@ -168,6 +176,7 @@ pub trait StadhouderStateEngine {
     fn process_messages(
         &mut self,
         timestamp_ms: i64,
+        memory_pct: f64,
         new_connections: &[NewConnection],
         closed_connections: &[ClosedConnection],
         messages: &[InboundMessage],

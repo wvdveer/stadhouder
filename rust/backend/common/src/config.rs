@@ -36,6 +36,17 @@ pub struct Config {
     /// `user_id_url`'s JSON response (e.g. `data.id`) - see
     /// [`crate::identity`]. Required whenever `user_id_url` is set.
     pub user_id_json: Option<String>,
+    /// The service's own memory ceiling, in bytes, from `MEMORY_LIMIT_MB`.
+    /// Unset means no limit - the service never measures its own memory and
+    /// `connect` never refuses on that basis (see
+    /// [`crate::state::ServiceFlag::memory_pct`]).
+    pub memory_limit_bytes: Option<u64>,
+    /// The `memory_pct` (percentage of `memory_limit_bytes`) at or above
+    /// which the client CGI program's `connect` action refuses new
+    /// connections, from `MEMORY_REJECT_PCT`. Defaults to `100.0`. Only
+    /// meaningful when `memory_limit_bytes` is also set - `memory_pct` is
+    /// always `0.0` otherwise, so this never triggers.
+    pub memory_reject_pct: f64,
 }
 
 impl Default for Config {
@@ -45,6 +56,8 @@ impl Default for Config {
             cookie_name: None,
             user_id_url: None,
             user_id_json: None,
+            memory_limit_bytes: None,
+            memory_reject_pct: 100.0,
         }
     }
 }
@@ -89,11 +102,39 @@ impl Config {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
 
+        let memory_limit_bytes = match values.get("MEMORY_LIMIT_MB").map(|v| v.trim()).filter(|v| !v.is_empty()) {
+            None => None,
+            Some(v) => {
+                let mb: u64 = v
+                    .parse()
+                    .map_err(|_| format!("MEMORY_LIMIT_MB must be a positive integer, not '{v}'"))?;
+                if mb == 0 {
+                    return Err("MEMORY_LIMIT_MB must be > 0".to_string());
+                }
+                Some(mb * 1024 * 1024)
+            }
+        };
+
+        let memory_reject_pct = match values.get("MEMORY_REJECT_PCT").map(|v| v.trim()).filter(|v| !v.is_empty()) {
+            None => 100.0,
+            Some(v) => {
+                let pct: f64 = v
+                    .parse()
+                    .map_err(|_| format!("MEMORY_REJECT_PCT must be a positive number, not '{v}'"))?;
+                if !(pct > 0.0) {
+                    return Err("MEMORY_REJECT_PCT must be > 0".to_string());
+                }
+                pct
+            }
+        };
+
         Ok(Config {
             test_env,
             cookie_name,
             user_id_url,
             user_id_json,
+            memory_limit_bytes,
+            memory_reject_pct,
         })
     }
 
@@ -202,5 +243,60 @@ mod tests {
     #[test]
     fn bad_test_env_is_rejected() {
         assert!(Config::from_str("TEST_ENV=yes").is_err());
+    }
+
+    #[test]
+    fn memory_limit_mb_is_read_as_bytes() {
+        let config = Config::from_str("MEMORY_LIMIT_MB=256").unwrap();
+        assert_eq!(config.memory_limit_bytes, Some(256 * 1024 * 1024));
+    }
+
+    #[test]
+    fn blank_memory_limit_mb_counts_as_unset() {
+        let config = Config::from_str("MEMORY_LIMIT_MB=").unwrap();
+        assert_eq!(config.memory_limit_bytes, None);
+    }
+
+    #[test]
+    fn zero_memory_limit_mb_is_rejected() {
+        assert!(Config::from_str("MEMORY_LIMIT_MB=0").is_err());
+    }
+
+    #[test]
+    fn non_numeric_memory_limit_mb_is_rejected() {
+        assert!(Config::from_str("MEMORY_LIMIT_MB=lots").is_err());
+    }
+
+    #[test]
+    fn memory_reject_pct_defaults_to_100() {
+        let config = Config::from_str("").unwrap();
+        assert_eq!(config.memory_reject_pct, 100.0);
+    }
+
+    #[test]
+    fn memory_reject_pct_is_read() {
+        let config = Config::from_str("MEMORY_REJECT_PCT=90").unwrap();
+        assert_eq!(config.memory_reject_pct, 90.0);
+    }
+
+    #[test]
+    fn blank_memory_reject_pct_defaults_to_100() {
+        let config = Config::from_str("MEMORY_REJECT_PCT=").unwrap();
+        assert_eq!(config.memory_reject_pct, 100.0);
+    }
+
+    #[test]
+    fn zero_memory_reject_pct_is_rejected() {
+        assert!(Config::from_str("MEMORY_REJECT_PCT=0").is_err());
+    }
+
+    #[test]
+    fn negative_memory_reject_pct_is_rejected() {
+        assert!(Config::from_str("MEMORY_REJECT_PCT=-5").is_err());
+    }
+
+    #[test]
+    fn non_numeric_memory_reject_pct_is_rejected() {
+        assert!(Config::from_str("MEMORY_REJECT_PCT=lots").is_err());
     }
 }

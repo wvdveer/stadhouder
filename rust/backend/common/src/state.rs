@@ -48,19 +48,31 @@ pub fn last_run_ms() -> Result<Option<i64>, String> {
     read_int_file("last_run")
 }
 
-/// The service flag file: proof of a live service instance. Cron starts
-/// the service every minute; a starting instance that finds a fresh flag
-/// (another instance still updating it) terminates instead of competing.
-/// Holds the engine time (ms) it was last updated at.
+/// The service flag file: proof of a live service instance, plus its
+/// last-measured memory usage. Cron starts the service every minute; a
+/// starting instance that finds a fresh flag (another instance still
+/// updating it) terminates instead of competing.
+#[derive(Serialize, Deserialize)]
+pub struct ServiceFlag {
+    /// The engine time (ms) this flag was last written at.
+    pub updated_ms: i64,
+    /// The service's own memory usage, as a percentage of
+    /// `MEMORY_LIMIT_MB` (see `crate::config::Config::memory_limit_bytes`),
+    /// as of the last measurement. Always `0.0` when no limit is
+    /// configured - the service never measures in that case. `connect` (the
+    /// client CGI program) reads this to refuse new connections once it
+    /// reaches 100.0.
+    pub memory_pct: f64,
+}
+
 pub fn service_flag_path(state_dir: &Path) -> PathBuf {
     state_dir.join("service_flag")
 }
 
-/// The engine time the flag was last updated at, or `None` if no flag
-/// exists (no instance is running, or the last one crashed - staleness is
-/// the caller's judgement). An empty file reads as `None`, like the other
-/// state files.
-pub fn read_service_flag_ms(state_dir: &Path) -> Result<Option<i64>, String> {
+/// The flag's current contents, or `None` if no flag exists (no instance is
+/// running, or the last one crashed - staleness is the caller's judgement).
+/// An empty file reads as `None`, like the other state files.
+pub fn read_service_flag(state_dir: &Path) -> Result<Option<ServiceFlag>, String> {
     let path = service_flag_path(state_dir);
     if !path.exists() {
         return Ok(None);
@@ -70,17 +82,18 @@ pub fn read_service_flag_ms(state_dir: &Path) -> Result<Option<i64>, String> {
     if contents.trim().is_empty() {
         return Ok(None);
     }
-    parse_int(&contents)
+    serde_json::from_str(&contents)
         .map(Some)
-        .map_err(|e| format!("{}: {e}", path.display()))
+        .map_err(|e| format!("failed to parse {}: {e}", path.display()))
 }
 
-pub fn write_service_flag_ms(state_dir: &Path, engine_ms: i64) -> Result<(), String> {
+pub fn write_service_flag(state_dir: &Path, engine_ms: i64, memory_pct: f64) -> Result<(), String> {
     fs::create_dir_all(state_dir)
         .map_err(|e| format!("failed to create {}: {e}", state_dir.display()))?;
     let path = service_flag_path(state_dir);
-    fs::write(&path, format!("{engine_ms}\n"))
-        .map_err(|e| format!("failed to write {}: {e}", path.display()))
+    let contents = serde_json::to_string(&ServiceFlag { updated_ms: engine_ms, memory_pct })
+        .map_err(|e| format!("failed to serialize service flag: {e}"))?;
+    fs::write(&path, contents).map_err(|e| format!("failed to write {}: {e}", path.display()))
 }
 
 /// Best-effort - a missing flag is already the desired end state.
@@ -267,5 +280,36 @@ mod tests {
     #[test]
     fn rejects_non_number_float() {
         assert!(parse_float("fast").is_err());
+    }
+
+    #[test]
+    fn service_flag_round_trips() {
+        let dir = std::env::temp_dir().join(format!(
+            "stadhouder-state-test-{}-{}",
+            "service_flag_round_trips",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        write_service_flag(&dir, 123_456, 42.5).unwrap();
+        let flag = read_service_flag(&dir).unwrap().unwrap();
+        assert_eq!(flag.updated_ms, 123_456);
+        assert_eq!(flag.memory_pct, 42.5);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn missing_service_flag_is_none() {
+        let dir = std::env::temp_dir().join(format!(
+            "stadhouder-state-test-{}-{}",
+            "missing_service_flag_is_none",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert!(read_service_flag(&dir).unwrap().is_none());
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

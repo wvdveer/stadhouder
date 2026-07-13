@@ -50,6 +50,7 @@ use common::pipes::{self, PipeNames};
 use common::state::{self, ConnectionProfile};
 use common::{time, Config};
 use serde_json::Value;
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
 use crate::{
     CloseReason, ClosedConnection, ConnectionId, ExpiredTimer, InboundMessage, NewConnection,
@@ -102,6 +103,27 @@ fn connection_id_from_filename(path: &Path) -> Option<ConnectionId> {
     Some(tag.replace('_', "-"))
 }
 
+/// This process's own RSS as a percentage of `MEMORY_LIMIT_MB` (see
+/// `common::config::Config::memory_limit_bytes`). `0.0` when no limit is
+/// configured - nobody asked for the measurement, so it isn't taken.
+fn memory_pct(sys: &mut System, memory_limit_bytes: Option<u64>) -> f64 {
+    let Some(limit) = memory_limit_bytes else {
+        return 0.0;
+    };
+    let Ok(pid) = sysinfo::get_current_pid() else {
+        return 0.0;
+    };
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        false,
+        ProcessRefreshKind::nothing().with_memory(),
+    );
+    let Some(process) = sys.process(pid) else {
+        return 0.0;
+    };
+    (process.memory() as f64 / limit as f64) * 100.0
+}
+
 pub(crate) fn run_loop(
     engine: &mut dyn StadhouderStateEngine,
     config: &Config,
@@ -112,19 +134,21 @@ pub(crate) fn run_loop(
         .map_err(|e| format!("failed to create {}: {e}", state_dir.display()))?;
 
     let mut started_ms = time::now_millis(config)?;
+    let mut sys = System::new();
 
     // Singleton check: a fresh flag means the previous cron start is still
     // operating - this instance's job is to not exist. A flag from the
     // future (simulated time jumped backwards since it was written) can't
     // prove liveness, so it counts as stale.
-    if let Some(flag_ms) = state::read_service_flag_ms(&state_dir)? {
-        let age_ms = started_ms - flag_ms;
+    if let Some(flag) = state::read_service_flag(&state_dir)? {
+        let age_ms = started_ms - flag.updated_ms;
         if (0..FLAG_STALE_MS).contains(&age_ms) {
             eprintln!("stadhouder: another service instance is operating (flag is fresh); exiting");
             return Ok(());
         }
     }
-    state::write_service_flag_ms(&state_dir, started_ms)?;
+    let mut current_memory_pct = memory_pct(&mut sys, config.memory_limit_bytes);
+    state::write_service_flag(&state_dir, started_ms, current_memory_pct)?;
     let mut flag_updated_ms = started_ms;
 
     // This instance is now the live one - its one and only init() call.
@@ -168,7 +192,8 @@ pub(crate) fn run_loop(
         }
 
         if now_ms - flag_updated_ms >= FLAG_UPDATE_INTERVAL_MS {
-            state::write_service_flag_ms(&state_dir, now_ms)?;
+            current_memory_pct = memory_pct(&mut sys, config.memory_limit_bytes);
+            state::write_service_flag(&state_dir, now_ms, current_memory_pct)?;
             flag_updated_ms = now_ms;
         }
 
@@ -328,6 +353,7 @@ pub(crate) fn run_loop(
         {
             let mut output = engine.process_messages(
                 now_ms,
+                current_memory_pct,
                 &new_connections,
                 &closed_connections,
                 &messages,
@@ -427,6 +453,7 @@ mod tests {
         fn process_messages(
             &mut self,
             _timestamp_ms: i64,
+            _memory_pct: f64,
             new_connections: &[NewConnection],
             _closed_connections: &[ClosedConnection],
             messages: &[InboundMessage],
@@ -468,12 +495,12 @@ mod tests {
         std::fs::create_dir_all(&state_dir).unwrap();
 
         let flag_ms = time::calendar_now_millis();
-        state::write_service_flag_ms(&state_dir, flag_ms).unwrap();
+        state::write_service_flag(&state_dir, flag_ms, 0.0).unwrap();
 
         run_loop(&mut EchoEngine, &Config { test_env: false, ..Default::default() }, &stadhouder_dir).unwrap();
 
         assert_eq!(
-            state::read_service_flag_ms(&state_dir).unwrap(),
+            state::read_service_flag(&state_dir).unwrap().map(|f| f.updated_ms),
             Some(flag_ms),
             "the deferring instance must not touch the live instance's flag"
         );
@@ -500,12 +527,12 @@ mod tests {
         // Wait for startup (the flag appearing) before writing the
         // profile - the loop purges pre-existing profiles as stale.
         for _ in 0..100 {
-            if state::read_service_flag_ms(&state_dir).unwrap().is_some() {
+            if state::read_service_flag(&state_dir).unwrap().is_some() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(25));
         }
-        assert!(state::read_service_flag_ms(&state_dir).unwrap().is_some());
+        assert!(state::read_service_flag(&state_dir).unwrap().is_some());
 
         let connection_id = "00000000-0000-4000-8000-000000000042".to_string();
         let names = pipes::pipe_names_for(&stadhouder_dir, &connection_id);
@@ -526,7 +553,7 @@ mod tests {
         assert!(greeting.contains(r#""hello":"alice""#), "got: {greeting}");
 
         // The instance is flying its flag while it runs.
-        assert!(state::read_service_flag_ms(&state_dir).unwrap().is_some());
+        assert!(state::read_service_flag(&state_dir).unwrap().is_some());
 
         pipes::client_send(&names.client_to_server, r#"{"cmd":"hi"}"#, 1.0).unwrap();
         let echoed = pipes::client_receive(&names.server_to_client, 1.0).unwrap();
@@ -537,7 +564,7 @@ mod tests {
 
         // Shutdown cleaned up the profile and the flag.
         assert!(state::connection_profile_paths(&state_dir).unwrap().is_empty());
-        assert!(state::read_service_flag_ms(&state_dir).unwrap().is_none());
+        assert!(state::read_service_flag(&state_dir).unwrap().is_none());
 
         let _ = std::fs::remove_dir_all(stadhouder_dir.parent().unwrap());
     }
@@ -566,6 +593,7 @@ mod tests {
         fn process_messages(
             &mut self,
             timestamp_ms: i64,
+            _memory_pct: f64,
             _new_connections: &[NewConnection],
             closed_connections: &[ClosedConnection],
             messages: &[InboundMessage],
@@ -629,7 +657,7 @@ mod tests {
 
     fn wait_for_flag(state_dir: &Path) {
         for _ in 0..100 {
-            if state::read_service_flag_ms(state_dir).unwrap().is_some() {
+            if state::read_service_flag(state_dir).unwrap().is_some() {
                 return;
             }
             std::thread::sleep(Duration::from_millis(25));
