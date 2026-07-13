@@ -52,8 +52,8 @@ pub enum CloseReason {
     /// The client formally disconnected: its `close` request deleted the
     /// connection's profile file (or the file otherwise vanished).
     ClientDisconnected,
-    /// The service disconnected it after two minutes with no message from
-    /// the client (not even a heartbeat).
+    /// The service disconnected it after two minutes with no sign of the
+    /// client - no message (not even a heartbeat) and no served `poll`.
     ServerIdleTimeout,
     /// The engine itself ordered this close, via a previous call's
     /// `EngineOutput::close_connections`. Reported one call later than the
